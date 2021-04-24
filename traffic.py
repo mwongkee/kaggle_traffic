@@ -3,19 +3,33 @@ import pickle
 import typing
 from collections import Counter
 from itertools import chain
-
+import numba
 import networkx as nx
 import numpy as np
 import pandas as pd
+from numba import jit
+from numba import njit
+from numba.core import types
+from numba.typed import Dict
 
-ALPHA = 0.8
+
+ALPHA = 0.999
 
 
 def initialize_queues(
     cars_df: pd.DataFrame, streets: typing.List
 ) -> typing.Dict[int, typing.List[int]]:
-    queues = {s: [] for s in streets}
-    queues.update(cars_df.groupby("location")["car_num"].apply(list).to_dict())
+    queues = Dict.empty(
+        key_type=types.unicode_type,
+        value_type=types.int32[:],
+    )
+    MAX_QUEUE = 50
+    for s in streets:
+        queues[s] = np.zeros(MAX_QUEUE, dtype=np.int32)
+
+    to_insert = cars_df.groupby("location")["car_num"].apply(list).to_dict()
+    for street, cars in to_insert.items():
+        queues[s][:len(cars)] = cars
     return queues
 
 
@@ -165,7 +179,7 @@ def schedules_dict_to_schedules_list(
 
 def schedules_dict_to_intersection_schedules(
     schedules_dict: typing.Dict[int, typing.List[typing.Tuple[str, int]]]
-) -> typing.Dict[int, typing.List[str]]:
+) -> numba.types.Dict:
     intersection_schedules = {}
     for node, schedules in schedules_dict.items():
         intersection_schedule = []
@@ -276,27 +290,18 @@ def schedules_dict_to_intersection_schedules(
 #     return metrics_df
 
 
-def fast_simulation(
-    T: int,
-    cars_df: pd.DataFrame,
-    street_to_length: typing.Dict[str, int],
-    intersection_schedules: typing.Dict[int, typing.List[str]],
-) -> typing.Tuple[pd.DataFrame, int]:
-    score = 0
 
-    streets = list(street_to_length.keys())
-    queues = initialize_queues(cars_df, streets)
-
+@jit(nopython=True)
+def run_sim(queues:numba.typed.Dict,
+                             distance_left: np.ndarray,
+                             index: np.ndarray,
+                             num_streets: np.ndarray,
+                             car_num: np.ndarray,
+                             done: np.ndarray,
+                             path_streets: np.ndarray,
+                             location: np.ndarray,
+                             intersection_schedules:numba.typed.Dict):
     metrics = []
-
-    # numpy arrays
-    distance_left = cars_df["distance_left"].values
-    index = cars_df["index"].values
-    num_streets = (cars_df["num_streets"]).values
-    car_num = cars_df["car_num"].values
-    done = cars_df["done"].values
-    path_streets = cars_df["path_streets"].values
-    location = cars_df["location"].values
     for t in range(T):
         # if t % 1000 == 0:
         #     print(t)
@@ -359,7 +364,44 @@ def fast_simulation(
                 num_done=np.sum(done),
             )
         )
+    return metrics, score
 
+
+def fast_simulation(
+    T: int,
+    cars_df: pd.DataFrame,
+    street_to_length: typing.Dict[str, int],
+    intersection_schedules: typing.Dict[int, typing.List[str]],
+) -> typing.Tuple[pd.DataFrame, int]:
+    score = 0
+
+    streets = list(street_to_length.keys())
+    queues = initialize_queues(cars_df, streets)
+
+    metrics = []
+
+    # numpy arrays
+
+    distance_left=cars_df["distance_left"].values
+    index=cars_df["index"].values
+    num_streets=(cars_df["num_streets"]).values
+    car_num=cars_df["car_num"].values
+    done=cars_df["done"].values
+    path_streets=cars_df["path_streets"].values
+    location=cars_df["location"].values
+
+
+    # queues dict[list[int]]
+
+    metrics, score = run_sim(queues,
+                             distance_left,
+                             index,
+                             num_streets,
+                             car_num,
+                             done,
+                             path_streets,
+                             location,
+                             intersection_schedules)
     metrics_df = pd.DataFrame.from_dict(metrics)
     return metrics_df, score
 
