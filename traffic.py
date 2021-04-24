@@ -1,3 +1,4 @@
+import copy
 import pickle
 import typing
 from collections import Counter
@@ -141,12 +142,14 @@ def add_to_queues_np(
 def mutate_schedules(
     schedules_dict: typing.Dict[int, typing.List[typing.Tuple[str, int]]]
 ):
+    schedules_dict = copy.deepcopy(schedules_dict)
     for node, schedules in schedules_dict.items():
         for street in schedules:
             if np.random.random() > ALPHA:
                 street[1] = np.max(
                     [0, schedules_dict[0][0][1] + np.random.choice([1, -1])]
                 )
+    return schedules_dict
 
 
 def schedules_dict_to_schedules_list(
@@ -170,106 +173,107 @@ def schedules_dict_to_intersection_schedules(
             street_name, green_time = street
             if green_time > 0:
                 intersection_schedule.append([street_name] * green_time)
-        intersection_schedules[node] = list(chain(*intersection_schedule))
+
+        node_list = list(chain(*intersection_schedule))
+        if len(node_list):
+            intersection_schedules[node] = node_list
     return intersection_schedules
 
 
-def simulation(
-    T: int, cars_df: pd.DataFrame, street_to_length: typing.Dict[str, int]
-) -> pd.DataFrame:
-    queues = initialize_queues(cars_df)
-    history = {}
-    metrics = []
-    for t in range(T):
-        print(t)
-        history[t] = cars_df.copy()
-        #     print(queues)
-        # if t > 50:
-        #     break
-        people_not_at_lights_idx = cars_df["distance_left"] > 1
-        people_approaching_lights = cars_df["distance_left"] == 1
-        people_finishing = np.logical_and(
-            cars_df["distance_left"] == 1,
-            cars_df["index"] == (cars_df["num_streets"] - 1),
-        )
-
-        #     print(t, len(people_not_at_lights))
-        green_lights = get_green_lights(intersection_schedules, t)
-        #     print(queues)
-        starting_cars = [
-            queues[green_light].pop(0)
-            for green_light in green_lights
-            if queues.get(green_light)
-        ]
-        #     print('starting_cars')
-        #     print(starting_cars)
-        #     print(queues)
-
-        #     print('starting_cars', len(starting_cars))
-        #     print('people_approaching_lights', people_approaching_lights)
-
-        starting_cars_idx = np.logical_and(
-            cars_df["car_num"].isin(starting_cars), ~cars_df["done"]
-        )
-        if starting_cars_idx.any():
-            #         print(cars_df.loc[starting_cars_idx, :])
-            cars_df.loc[starting_cars_idx, "index"] += 1
-            street_names = cars_df.loc[
-                starting_cars_idx, ["index", "path_streets"]
-            ].apply(lambda x: x["path_streets"][x["index"]], axis=1)
-            cars_df.loc[starting_cars_idx, "location"] = street_names
-            cars_df.loc[starting_cars_idx, "distance_left"] = (
-                street_names.map(street_to_length) - 1
-            )
-            cars_df.loc[starting_cars_idx, "total_distance_left"] -= 1
-            if pd.isnull(cars_df["distance_left"]).any():
-                print("error")
-        #         print(cars_df.loc[starting_cars_idx, :])
-        #         print('-------------')
-
-        else:
-            print("no one")
-
-        people_starting_length_1 = starting_cars_idx & (cars_df["distance_left"] == 1)
-        driving_idx = (
-            people_not_at_lights_idx | people_approaching_lights | people_finishing
-        )
-        cars_df.loc[driving_idx, "distance_left"] -= 1
-        cars_df.loc[driving_idx, "total_distance_left"] -= 1
-
-        queuing_before = len(list(chain(*queues.values())))
-
-        queues_to_add = cars_df.loc[
-            (people_approaching_lights | people_starting_length_1), ["location"]
-        ]["location"].to_dict()
-        add_to_queues(queues, queues_to_add)
-        queuing_after = len(list(chain(*queues.values())))
-
-        cars_df.loc[people_finishing, "done"] = True
-
-        metrics.append(
-            dict(
-                driving=driving_idx.sum(),
-                queuing_before=queuing_before,
-                queuing_after=queuing_after,
-                num_queues_to_add=len(queues_to_add),
-                num_starting=starting_cars_idx.sum(),
-                max_index=cars_df["index"].max(),
-                min_index=cars_df["index"].min(),
-                mean_index=cars_df["index"].mean(),
-                # max_queues = max(map(len, queues.values())),
-                num_done=cars_df["done"].sum(),
-                max_intersection_queue=cars_df[cars_df["distance_left"] == 0][
-                    "location"
-                ]
-                .map(street_to_node)
-                .value_counts()
-                .max(),
-            )
-        )
-
-    metrics_df = pd.DataFrame.from_dict(metrics)
-    return metrics_df
+# def simulation(
+#     T: int, cars_df: pd.DataFrame, street_to_length: typing.Dict[str, int]
+# ) -> pd.DataFrame:
+#     queues = initialize_queues(cars_df)
+#     history = {}
+#     metrics = []
+#     for t in range(T):
+#         # print(t)
+#         history[t] = cars_df.copy()
+#         #     print(queues)
+#         # if t > 50:
+#         #     break
+#         people_not_at_lights_idx = cars_df["distance_left"] > 1
+#         people_approaching_lights = cars_df["distance_left"] == 1
+#         people_finishing = np.logical_and(
+#             cars_df["distance_left"] == 1,
+#             cars_df["index"] == (cars_df["num_streets"] - 1),
+#         )
+#
+#         #     print(t, len(people_not_at_lights))
+#         green_lights = get_green_lights(intersection_schedules, t)
+#         #     print(queues)
+#         starting_cars = [
+#             queues[green_light].pop(0)
+#             for green_light in green_lights
+#             if queues.get(green_light)
+#         ]
+#         #     print('starting_cars')
+#         #     print(starting_cars)
+#         #     print(queues)
+#
+#         #     print('starting_cars', len(starting_cars))
+#         #     print('people_approaching_lights', people_approaching_lights)
+#
+#         starting_cars_idx = np.logical_and(
+#             cars_df["car_num"].isin(starting_cars), ~cars_df["done"]
+#         )
+#         if starting_cars_idx.any():
+#             #         print(cars_df.loc[starting_cars_idx, :])
+#             cars_df.loc[starting_cars_idx, "index"] += 1
+#             street_names = cars_df.loc[
+#                 starting_cars_idx, ["index", "path_streets"]
+#             ].apply(lambda x: x["path_streets"][x["index"]], axis=1)
+#             cars_df.loc[starting_cars_idx, "location"] = street_names
+#             cars_df.loc[starting_cars_idx, "distance_left"] = (
+#                 street_names.map(street_to_length) - 1
+#             )
+#             cars_df.loc[starting_cars_idx, "total_distance_left"] -= 1
+#             if pd.isnull(cars_df["distance_left"]).any():
+#                 print("error")
+#         #         print(cars_df.loc[starting_cars_idx, :])
+#         #         print('-------------')
+#
+#
+#         people_starting_length_1 = starting_cars_idx & (cars_df["distance_left"] == 1)
+#         driving_idx = (
+#             people_not_at_lights_idx | people_approaching_lights | people_finishing
+#         )
+#         cars_df.loc[driving_idx, "distance_left"] -= 1
+#         cars_df.loc[driving_idx, "total_distance_left"] -= 1
+#
+#         queuing_before = len(list(chain(*queues.values())))
+#
+#         queues_to_add = cars_df.loc[
+#             (people_approaching_lights | people_starting_length_1), ["location"]
+#         ]["location"].to_dict()
+#         add_to_queues(queues, queues_to_add)
+#         queuing_after = len(list(chain(*queues.values())))
+#
+#         cars_df.loc[people_finishing, "done"] = True
+#
+#         metrics.append(
+#             dict(
+#                 driving=driving_idx.sum(),
+#                 queuing_before=queuing_before,
+#                 queuing_after=queuing_after,
+#                 num_queues_to_add=len(queues_to_add),
+#                 num_starting=starting_cars_idx.sum(),
+#                 max_index=cars_df["index"].max(),
+#                 min_index=cars_df["index"].min(),
+#                 mean_index=cars_df["index"].mean(),
+#                 # max_queues = max(map(len, queues.values())),
+#                 num_done=cars_df["done"].sum(),
+#                 max_intersection_queue=cars_df[cars_df["distance_left"] == 0][
+#                     "location"
+#                 ]
+#                 .map(street_to_node)
+#                 .value_counts()
+#                 .max(),
+#             )
+#         )
+#
+#     metrics_df = pd.DataFrame.from_dict(metrics)
+#     return metrics_df
 
 
 def fast_simulation(
@@ -294,8 +298,8 @@ def fast_simulation(
     path_streets = cars_df["path_streets"].values
     location = cars_df["location"].values
     for t in range(T):
-        if t % 100 == 0:
-            print(t)
+        # if t % 1000 == 0:
+        #     print(t)
         people_not_at_lights_idx = distance_left > 1
         people_approaching_lights = distance_left == 1
 
@@ -323,8 +327,6 @@ def fast_simulation(
             distance_left[starting_cars_idx] = list(
                 map(lambda x: street_to_length[x] - 1, starting_streets)
             )
-        else:
-            print("no one")
 
         people_starting_length_1 = starting_cars_idx & (distance_left == 0)
         driving_idx = (
@@ -377,7 +379,10 @@ best_score = -1
 best_schedules_dict = None
 
 schedules_dict = simple_schedule(graph)
-for i in range(10):
+import time
+
+start = time.time()
+for i in range(10000):
     schedules = schedules_dict_to_schedules_list(schedules_dict)
     intersection_schedules = schedules_dict_to_intersection_schedules(schedules_dict)
 
@@ -386,8 +391,11 @@ for i in range(10):
     )
 
     if score > best_score:
+        best_score = score
         best_schedules_dict = schedules_dict
-        print("new best score", score)
+        print("new best score", score, time.time() - start)
         pickle.dump(schedules_dict, open(f"{score}", "wb"))
+    else:
+        print(f"{score} < {best_score}", time.time() - start)
 
-    schedules_dict = mutate_schedules(schedules_dict.copy())
+    schedules_dict = mutate_schedules(schedules_dict)
