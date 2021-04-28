@@ -1,12 +1,13 @@
 import copy
 import pickle
 import typing
-from collections import Counter
+from collections import Counter, OrderedDict
 from itertools import chain
-
+from line_profiler import LineProfiler
 import networkx as nx
 import numpy as np
 import pandas as pd
+import random
 
 ALPHA = 0.8
 
@@ -14,8 +15,7 @@ ALPHA = 0.8
 def initialize_queues(
     cars_df: pd.DataFrame, streets: typing.List
 ) -> typing.Dict[int, typing.List[int]]:
-    queues = {s: [] for s in streets}
-    queues.update(cars_df.groupby("location")["car_num"].apply(list).to_dict())
+    queues = cars_df.groupby("location")["car_num"].apply(list).to_dict()
     return queues
 
 def parse_file(
@@ -71,52 +71,43 @@ def parse_file(
 
 def simple_schedule(
     graph: nx.DiGraph,
+    cars_df: pd.DataFrame
 ) -> typing.Dict[int, typing.List[typing.Tuple[str, int]]]:
-    schedules = []
-    intersection_schedules = {}
-    schedules_dict = {}
-    for node in graph.nodes:
-        schedule = []
-        intersection_schedule = []
-        for u, v, data in graph.in_edges(node, data=True):
-            schedule.append([data["street_name"], 1])
-            intersection_schedule.append([data["street_name"] * 1])
-        schedules.append([node, len(schedule), schedule])
-        schedules_dict[node] = schedule
-        intersection_schedules[node] = list(chain(*intersection_schedule))
-    return schedules_dict  # schedules, intersection_schedules, schedules_dict
-
-
-def schedule_by_frequency(
-    graph: nx.DiGraph, cars_df: pd.DataFrame
-) -> typing.Dict[int, typing.List[typing.Tuple[str, int]]]:
-
     all_paths = chain(*cars_df["path_streets"].tolist())
     counts = Counter(all_paths)
 
-    schedules = []
     schedules_dict = {}
-    intersection_schedules = {}
     for node in graph.nodes:
-        schedule = []
-        intersection_schedule = []
+        schedule = OrderedDict()
+        for u, v, data in graph.in_edges(node, data=True):
+            if data["street_name"] in counts:
+                schedule[data["street_name"]] = 1
+        schedules_dict[node] = schedule
+    return schedules_dict
+
+
+def schedule_by_frequency(
+    graph: nx.DiGraph, counts
+) -> typing.Dict[int, typing.List[typing.Tuple[str, int]]]:
+
+
+
+    schedules_dict = {}
+    for node in graph.nodes:
+        schedule = OrderedDict()
         for u, v, data in graph.in_edges(node, data=True):
             street_name = data["street_name"]
             green_time = counts[street_name]
-            schedule.append([street_name, green_time])
-            if green_time > 0:
-                intersection_schedule.append([data["street_name"]] * green_time)
-        schedules.append([node, len(schedule), schedule])
+            schedule[street_name] = green_time
         schedules_dict[node] = schedule
-        if len(list(chain(*intersection_schedule))):
-            intersection_schedules[node] = list(chain(*intersection_schedule))
-    return schedules_dict  # schedules, intersection_schedules, schedules_dict
+    return schedules_dict
 
 
 def get_green_lights(
-    intersection_schedules: typing.Dict[int, typing.List[str]], t: int
+    intersection_schedules: typing.Dict[int, typing.List[str]], t: int,
+        queues, street_to_intersection
 ) -> typing.List[str]:
-    return [v[t % len(v)] for v in intersection_schedules.values()]
+    return {intersection_schedules[street_to_intersection[v]][t % len(intersection_schedules[street_to_intersection[v]])] for v in queues.keys() if street_to_intersection[v] in intersection_schedules}
 
 
 def add_to_queues(
@@ -124,8 +115,11 @@ def add_to_queues(
     queues_to_add: typing.Dict[int, typing.List[int]],
 ) -> None:
     for car_num, street_name in queues_to_add.items():
-        queue = queues[street_name]
-        queue.append(car_num)
+        if street_name in queues:
+            queue = queues[street_name]
+            queue.append(car_num)
+        else:
+            queues[street_name] = [car_num]
 
 
 def add_to_queues_np(
@@ -134,29 +128,73 @@ def add_to_queues_np(
     queues_to_add_carnums: np.ndarray,
 ) -> None:
     for car_num, street_name in zip(queues_to_add_carnums, queues_to_add_locations):
-        queue = queues[street_name]
-        queue.append(car_num)
+        if street_name in queues:
+            queue = queues[street_name]
+            queue.append(car_num)
+        else:
+            queues[street_name] = [car_num]
 
 
-def mutate_schedules(
-    schedules_dict: typing.Dict[int, typing.List[typing.Tuple[str, int]]]
+def shuffle_schedules(
+    schedules_dict: typing.Dict[int, OrderedDict]
 ):
     schedules_dict = copy.deepcopy(schedules_dict)
     for node, schedules in schedules_dict.items():
-        for street in schedules:
-            if np.random.random() > ALPHA:
-                street[1] = np.max(
-                    [0, schedules_dict[0][0][1] + np.random.choice([1, -1])]
-                )
+
+        items = list(schedules.items())
+        random.shuffle(items)
+        schedules_dict[node] = OrderedDict(items)
+
     return schedules_dict
 
 
+def update_schedules_change_max_waiting(
+    schedules_dict: typing.Dict[int, typing.List[typing.Tuple[str, int]]],
+    wait_times: typing.Dict[int, int],
+    street_to_node: typing.Dict[str, int],
+    amount: int
+):
+    schedules_dict = copy.deepcopy(schedules_dict)
+    import heapq
+    largest = set(heapq.nlargest(amount, wait_times.keys(), key=lambda k: wait_times[k]))
+    for street in largest:
+        schedules_dict[street_to_node[street]][street] += 1
+    return schedules_dict
+
+
+def update_schedules_change_disable(
+    schedules_dict: typing.Dict[int, typing.List[typing.Tuple[str, int]]],
+    street_to_node,
+    min_counts: typing.List[str],
+    amount
+):
+    schedules_dict = copy.deepcopy(schedules_dict)
+    to_zero = random.sample(min_counts, amount)
+    for street in to_zero:
+        schedules_dict[street_to_node[street]][street] += 1
+    return schedules_dict
+
+# def mutate_schedules(
+#     schedules_dict: typing.Dict[int, typing.List[typing.Tuple[str, int]]]
+# ):
+#     schedules_dict = copy.deepcopy(schedules_dict)
+#     for node, schedules in schedules_dict.items():
+#         import random
+#         random.shuffle(schedules)
+#         # for street in schedules:
+#         #     if np.random.random() > ALPHA:
+#         #         street[1] = np.max(
+#         #             [0, schedules_dict[0][0][1] + np.random.choice([1, -1], p=[0.95, 0.05])]
+#         #         )
+#     return schedules_dict
+
+
 def schedules_dict_to_schedules_list(
-    schedules_dict: typing.Dict[int, typing.List[typing.Tuple[str, int]]]
+    schedules_dict: typing.Dict[int, OrderedDict]
 ) -> typing.List[typing.Tuple[int, int, typing.List[typing.Tuple[str, int]]]]:
     schedules_list = []
     for node, schedules in schedules_dict.items():
-        filtered_schedules = [s for s in schedules if s[1] != 0]
+        filtered_schedules = [s for s in schedules.items() if s[1] != 0]
         if len(filtered_schedules) > 0:
             schedules_list.append([node, len(filtered_schedules), filtered_schedules])
     return schedules_list
@@ -168,8 +206,7 @@ def schedules_dict_to_intersection_schedules(
     intersection_schedules = {}
     for node, schedules in schedules_dict.items():
         intersection_schedule = []
-        for street in schedules:
-            street_name, green_time = street
+        for street_name, green_time in schedules.items():
             if green_time > 0:
                 intersection_schedule.append([street_name] * green_time)
 
@@ -184,12 +221,17 @@ def fast_simulation(
     cars_df: pd.DataFrame,
     street_to_length: typing.Dict[str, int],
     intersection_schedules: typing.Dict[int, typing.List[str]],
-) -> typing.Tuple[pd.DataFrame, int]:
+) -> typing.Tuple[pd.DataFrame, int, typing.Dict[str, int]]:
     score = 0
+    time_waiting = {s: 0 for s in street_to_length.keys()}
 
     streets = list(street_to_length.keys())
     queues = initialize_queues(cars_df, streets)
     metrics = []
+    street_to_intersection = dict()
+    for intersection, streets in intersection_schedules.items():
+        for street in streets:
+            street_to_intersection[street] = intersection
 
     # numpy arrays
     distance_left = cars_df["distance_left"].values
@@ -200,8 +242,8 @@ def fast_simulation(
     path_streets = cars_df["path_streets"].values
     location = cars_df["location"].values
     for t in range(T):
-        # if t % 1000 == 0:
-        #     print(t)
+        if t % 1000 == 0:
+            print(t)
         people_not_at_lights_idx = distance_left > 1
         people_approaching_lights = distance_left == 1
 
@@ -209,12 +251,15 @@ def fast_simulation(
             people_approaching_lights, index == (num_streets - 1)
         )
 
-        green_lights = get_green_lights(intersection_schedules, t)
-        starting_cars = [
-            queues[green_light].pop(0)
-            for green_light in green_lights
-            if queues.get(green_light)
-        ]
+        green_lights = get_green_lights(intersection_schedules, t, queues, street_to_intersection)
+
+        starting_cars = []
+        for green_light in green_lights:
+            if queues.get(green_light):
+                starting_cars.append(queues[green_light].pop(0))
+                if len(queues[green_light]) == 0:
+                    del queues[green_light]
+
 
         starting_cars_idx = np.isin(car_num, starting_cars) & ~done
         if starting_cars_idx.any():
@@ -248,7 +293,11 @@ def fast_simulation(
 
         add_to_queues_np(queues, queues_to_add_locations, queues_to_add_carnums)
 
-        score += (T - t) * people_finishing.sum()
+        # increment time_waiting
+        for k, v in queues.items():
+            time_waiting[k] += len(v)
+
+        score += (T - t + 1000) * people_finishing.sum()
         done[people_finishing] = True
 
         metrics.append(
@@ -264,8 +313,7 @@ def fast_simulation(
 
     metrics_df = pd.DataFrame.from_dict(metrics)
 
-    return metrics_df, score
-
+    return metrics_df, score, time_waiting
 
 
 graph, roads_df, cars_df, T, street_to_length = parse_file(r"hashcode.in")
@@ -282,24 +330,51 @@ node_to_streets = (
 best_score = -1
 best_schedules_dict = None
 
-schedules_dict = simple_schedule(graph)
+all_paths = chain(*cars_df["path_streets"].tolist())
+counts = Counter(all_paths)
+import heapq
+n_smallest = 10000
+smallest_counts = heapq.nsmallest(n_smallest, counts.keys(), key=lambda k: counts[k])
+
+
+schedules_dict = simple_schedule(graph, cars_df)
+method = 'simple'
+
 import time
+# from joblib import Parallel, delayed
 
-start = time.time()
-for i in range(10000):
-    schedules = schedules_dict_to_schedules_list(schedules_dict)
-    intersection_schedules = schedules_dict_to_intersection_schedules(schedules_dict)
+# N_SHUFFLES = 4
 
-    simple_metrics_df, score = fast_simulation(
-        T, cars_df.copy(), street_to_length, intersection_schedules
-    )
+for i in range(1000):
+    # intersection_schedules = schedules_dict_to_intersection_schedules(schedules_dict)
+    start = time.time()
+
+    tasks = []
+    # for i in range(N_SHUFFLES):
+    # schedule_dict_i = shuffle_schedules(schedules_dict)
+    intersection_schedule_i = schedules_dict_to_intersection_schedules(schedules_dict)
+
+    # lp = LineProfiler()
+    # lp_wrapper = lp(fast_simulation)
+    # metrics_df, score, time_waiting = lp_wrapper(T, cars_df.copy(), street_to_length, intersection_schedule_i)
+    # lp.print_stats()
+
+    metrics_df, score, time_waiting = fast_simulation(T, cars_df.copy(), street_to_length, intersection_schedule_i)
 
     if score > best_score:
         best_score = score
         best_schedules_dict = schedules_dict
-        print("new best score", score, time.time() - start)
+        print("new best score", method, score, time.time() - start)
         pickle.dump(schedules_dict, open(f"{score}", "wb"))
     else:
-        print(f"{score} < {best_score}", time.time() - start)
+        print(f"{score} < {best_score}", method, time.time() - start)
 
-    schedules_dict = mutate_schedules(schedules_dict)
+    method = random.choice([1, 2, 3, 4, 5])
+    if method == 1:
+        schedules_dict = update_schedules_change_max_waiting(best_schedules_dict, time_waiting, street_to_node, 5)
+        schedules_dict = shuffle_schedules(schedules_dict)
+    elif method == 2:
+        schedules_dict = update_schedules_change_disable(best_schedules_dict, street_to_node, smallest_counts, 5)
+        schedules_dict = shuffle_schedules(schedules_dict)
+    else:
+        schedules_dict = shuffle_schedules(schedules_dict)
